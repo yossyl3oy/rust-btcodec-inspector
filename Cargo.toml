@@ -1,16 +1,25 @@
 [package]
 name = "btcodec-inspector"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Rust port of imbushuo/BluetoothAudioCodecInspector — Windows-only ETW-based A2DP codec inspector"
+description = "Rust port of imbushuo/BluetoothAudioCodecInspector — Windows-only ETW-based A2DP codec inspector, usable as both a CLI and a library"
 repository = "https://github.com/yossyl3oy/rust-btcodec-inspector"
+
+[lib]
+name = "btcodec_inspector"
+path = "src/lib.rs"
 
 [[bin]]
 name = "btcodec-inspector"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:ctrlc"]
 
 [target.'cfg(windows)'.dependencies]
 ferrisetw = "1.2"
-ctrlc = "3"
 is_elevated = "0.1"
+ctrlc = { version = "3", optional = true }

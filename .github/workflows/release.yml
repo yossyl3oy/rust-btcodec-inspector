@@ -1,0 +1,78 @@
+name: Release
+
+# Push to main triggers an attempt. The version is read from Cargo.toml
+# (`vX.Y.Z`). If a Release for that tag already exists, the job skips —
+# i.e. once a version is successfully built and released, subsequent pushes
+# do not rebuild. If the build fails, the next commit will retry, since the
+# tag still does not exist.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from Cargo.toml
+        id: ver
+        shell: bash
+        run: |
+          version=$(grep -E '^version[[:space:]]*=[[:space:]]*"' Cargo.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$version" ]; then
+            echo "Could not parse version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version"   >> "$GITHUB_OUTPUT"
+          echo "tag=v$version"      >> "$GITHUB_OUTPUT"
+
+      - name: Skip if release already exists
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists — skipping build."
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $tag not found — will build."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.skip == 'false'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.skip == 'false'
+
+      - name: cargo build --release
+        if: steps.check.outputs.skip == 'false'
+        run: cargo build --release
+
+      - name: Stage artifact
+        if: steps.check.outputs.skip == 'false'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/btcodec-inspector.exe" \
+             "dist/btcodec-inspector-${{ steps.ver.outputs.tag }}-x86_64-pc-windows-msvc.exe"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

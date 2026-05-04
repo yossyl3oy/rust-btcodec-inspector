@@ -9,7 +9,7 @@ use ferrisetw::EventRecord;
 /// `A2dpStreaming` events with codec info during A2DP playback.
 const PROVIDER_GUID: &str = "8776ad1e-5022-4451-a566-f47e708b9075";
 const SESSION_NAME: &str = "BthA2DpInspectorSession";
-const STREAMING_TASK: &str = "A2dpStreaming";
+const STREAMING_EVENT: &str = "A2dpStreaming";
 
 /// Errors that can occur when starting an ETW session.
 #[derive(Debug)]
@@ -49,11 +49,34 @@ pub struct Watcher {
     trace: UserTrace,
 }
 
+/// Returns true if `BTCODEC_DEBUG` is set in the environment. When true,
+/// [`watch`] dumps every event it observes (and its parse result) to
+/// stderr, which is useful when no codec lines appear on the standard
+/// output and you want to know whether events are arriving at all and
+/// what fields they carry.
+fn debug_enabled() -> bool {
+    std::env::var_os("BTCODEC_DEBUG").is_some()
+}
+
+/// Returns the event name used for filtering. For TraceLogging providers
+/// (like `BthA2dp`) the name lives in the event's extended data, exposed
+/// via [`EventRecord::event_name`]. For manifest-based providers it
+/// instead appears as the schema's `task_name`. Try both so we are robust
+/// against either kind.
+fn event_name(record: &EventRecord, schema: &ferrisetw::schema::Schema) -> String {
+    let tlg = record.event_name();
+    if !tlg.is_empty() {
+        tlg
+    } else {
+        schema.task_name()
+    }
+}
+
 /// Try to extract an [`A2dpCodec`] from a single ETW event. Returns `None`
 /// (and the event is silently dropped by [`watch`]) when:
 ///
 /// - the event has no usable schema,
-/// - the schema task name is not `A2dpStreaming`,
+/// - the event name is not `A2dpStreaming`,
 /// - `A2dpStandardCodecId` is missing or has an unexpected type, or
 /// - the standard ID is `0xFF` (vendor-specific) but `A2dpVendorId` /
 ///   `A2dpVendorCodecId` cannot be parsed.
@@ -63,7 +86,7 @@ pub struct Watcher {
 /// payload format ever changes (e.g. a Windows update renames a field).
 fn parse_codec(record: &EventRecord, schema_locator: &SchemaLocator) -> Option<A2dpCodec> {
     let schema = schema_locator.event_schema(record).ok()?;
-    if schema.task_name() != STREAMING_TASK {
+    if event_name(record, &schema) != STREAMING_EVENT {
         return None;
     }
     let parser = Parser::create(record, &schema);
@@ -84,6 +107,38 @@ fn parse_codec(record: &EventRecord, schema_locator: &SchemaLocator) -> Option<A
     Some(A2dpCodec::new(standard_id, vendor_id, vendor_codec_id))
 }
 
+/// Dump everything we can about an event to stderr, with the parse result
+/// of the three codec fields. Only called when `BTCODEC_DEBUG` is set.
+fn debug_dump(record: &EventRecord, schema_locator: &SchemaLocator) {
+    match schema_locator.event_schema(record) {
+        Err(e) => {
+            eprintln!("[btcodec-debug] schema lookup failed: {e:?}");
+        }
+        Ok(schema) => {
+            let name = event_name(record, &schema);
+            eprintln!(
+                "[btcodec-debug] event provider={:?} task={:?} opcode={:?} \
+                 tlg_name={:?} merged_name={:?} event_id={} decoding={:?}",
+                schema.provider_name(),
+                schema.task_name(),
+                schema.opcode_name(),
+                record.event_name(),
+                name,
+                record.event_id(),
+                schema.decoding_source(),
+            );
+            let parser = Parser::create(record, &schema);
+            let std_id: Result<u8, _> = parser.try_parse("A2dpStandardCodecId");
+            let v_id: Result<u32, _> = parser.try_parse("A2dpVendorId");
+            let vc_id: Result<u32, _> = parser.try_parse("A2dpVendorCodecId");
+            eprintln!(
+                "[btcodec-debug]   parse: A2dpStandardCodecId={std_id:?} \
+                 A2dpVendorId={v_id:?} A2dpVendorCodecId={vc_id:?}"
+            );
+        }
+    }
+}
+
 /// Start watching for `A2dpStreaming` ETW events from the
 /// `Microsoft.Windows.Bluetooth.BthA2dp` provider. The callback is invoked
 /// once per event from which a codec can be fully parsed; events with
@@ -93,6 +148,9 @@ fn parse_codec(record: &EventRecord, schema_locator: &SchemaLocator) -> Option<A
 /// `callback` is `FnMut`, so captured state can be mutated directly
 /// (e.g. `let mut buffer = Vec::new(); watch(move |c| buffer.push(c))`).
 /// The bounds match those of `ferrisetw::ProviderBuilder::add_callback`.
+///
+/// Set the `BTCODEC_DEBUG` environment variable to dump every observed
+/// event (and the parse result of the three codec fields) to stderr.
 ///
 /// Requires the current process to be running with administrator
 /// privileges; otherwise [`Error::NotElevated`] is returned.
@@ -115,9 +173,14 @@ where
     // error is ignored because most of the time there is nothing to stop.
     let _ = stop_trace_by_name(SESSION_NAME);
 
+    let debug = debug_enabled();
+
     let provider = Provider::by_guid(PROVIDER_GUID)
         .add_callback(
             move |record: &EventRecord, schema_locator: &SchemaLocator| {
+                if debug {
+                    debug_dump(record, schema_locator);
+                }
                 if let Some(codec) = parse_codec(record, schema_locator) {
                     callback(codec);
                 }

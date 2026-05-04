@@ -29,6 +29,15 @@ A2DP Streaming event. Codec: AAC
 
 Press `Ctrl+C` to stop.
 
+### Debug mode
+
+If nothing appears after the initial banner (i.e. no `A2DP Streaming event.` lines while audio is playing), set `BTCODEC_DEBUG=1` to have every observed ETW event dumped to stderr along with the parse result for the three codec fields. This is the quickest way to tell whether events are arriving at all and whether the field names still match what your Windows version emits.
+
+```cmd
+set BTCODEC_DEBUG=1
+btcodec-inspector.exe
+```
+
 ## Library
 
 ```toml

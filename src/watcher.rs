@@ -2,7 +2,7 @@ use crate::A2dpCodec;
 use ferrisetw::parser::Parser;
 use ferrisetw::provider::Provider;
 use ferrisetw::schema_locator::SchemaLocator;
-use ferrisetw::trace::{TraceError, UserTrace};
+use ferrisetw::trace::{stop_trace_by_name, TraceError, UserTrace};
 use ferrisetw::EventRecord;
 
 /// `Microsoft.Windows.Bluetooth.BthA2dp` ETW provider GUID — emits
@@ -106,6 +106,14 @@ where
     if !is_elevated::is_elevated() {
         return Err(Error::NotElevated);
     }
+
+    // ETW realtime sessions live in the kernel and outlive the process that
+    // created them if it didn't get to run `Drop` (e.g. crashed, killed via
+    // Task Manager, debugger detach). On the next run, `start_and_process`
+    // would then fail with `EvntraceNativeError::AlreadyExist`. Stop any
+    // session we may have left behind under our well-known name first; the
+    // error is ignored because most of the time there is nothing to stop.
+    let _ = stop_trace_by_name(SESSION_NAME);
 
     let provider = Provider::by_guid(PROVIDER_GUID)
         .add_callback(

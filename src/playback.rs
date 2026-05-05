@@ -40,13 +40,21 @@ const PKEY_DEVICE_INSTANCE_ID: PROPERTYKEY = PROPERTYKEY {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackDevice {
     /// Human-readable name as shown in the Windows sound mixer
-    /// (e.g. `"Speakers (USB Audio Device)"`).
+    /// (e.g. `"Speakers (USB Audio Device)"`,
+    /// `"ヘッドセット イヤフォン (2- BTD 700)"`).
     pub friendly_name: String,
     /// PnP instance ID as it appears in Device Manager
     /// (e.g. `"USB\\VID_3542&PID_3001\\09B88CA9D6F088AB3C08"`).
+    /// Empty when the audio endpoint's property store does not expose
+    /// `DEVPKEY_Device_InstanceId` (common — most endpoints don't).
     pub instance_id: String,
+    /// `IMMDevice::GetId()` value, which always exists. Looks like
+    /// `"{0.0.0.00000000}.{e6327cad-dcec-4949-ae8a-991e976a79d2}"`. Useful
+    /// for diagnostics when [`PlaybackDevice::instance_id`] is empty.
+    pub endpoint_id: String,
     /// USB Vendor ID parsed from `instance_id`, if it follows the
-    /// `USB\VID_xxxx&PID_yyyy\...` format.
+    /// `USB\VID_xxxx&PID_yyyy\...` format. Almost always `None` until we
+    /// add a SetupAPI lookup that resolves the underlying PnP device.
     pub vid: Option<u16>,
     /// USB Product ID parsed from `instance_id`, if it follows the
     /// `USB\VID_xxxx&PID_yyyy\...` format.
@@ -130,18 +138,33 @@ unsafe fn inspect_inner() -> Result<CodecObservability, PlaybackError> {
         Err(e) => return Err(e.into()),
     };
 
+    // IMMDevice::GetId always returns a value; it is the audio endpoint's
+    // own GUID-style identifier, not the underlying PnP InstanceId. We
+    // capture it as a fallback because most audio endpoints do not expose
+    // PKEY_Device_InstanceId via their shell property store.
+    let endpoint_id = device
+        .GetId()
+        .ok()
+        .and_then(|p| {
+            let owned = p.to_string().ok();
+            windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as _));
+            owned
+        })
+        .unwrap_or_default();
+
     let store: IPropertyStore = device.OpenPropertyStore(STGM_READ)?;
     let friendly_name = read_string_property(&store, &PKEY_Device_FriendlyName).unwrap_or_default();
     let instance_id = read_string_property(&store, &PKEY_DEVICE_INSTANCE_ID).unwrap_or_default();
     let (vid, pid) = parse_usb_vid_pid(&instance_id);
 
     let info = PlaybackDevice {
-        friendly_name,
+        friendly_name: friendly_name.clone(),
         instance_id: instance_id.clone(),
+        endpoint_id,
         vid,
         pid,
     };
-    Ok(classify(&instance_id, info))
+    Ok(classify(&instance_id, &friendly_name, info))
 }
 
 /// Read a string-typed property from the device's [`IPropertyStore`].
@@ -185,18 +208,56 @@ fn field_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
     }
 }
 
-fn classify(instance_id: &str, info: PlaybackDevice) -> CodecObservability {
-    let upper = instance_id.to_ascii_uppercase();
-    if upper.starts_with("USB\\") {
-        CodecObservability::UsbAudioBypass(info)
-    } else if upper.starts_with("BTHENUM\\")
-        || upper.starts_with("BTHHFENUM\\")
-        || upper.contains("BTHA2DP")
-    {
-        CodecObservability::BluetoothMicrosoftStack(info)
-    } else {
-        CodecObservability::OtherOutput(info)
+fn classify(instance_id: &str, friendly_name: &str, info: PlaybackDevice) -> CodecObservability {
+    let upper_id = instance_id.to_ascii_uppercase();
+    if upper_id.starts_with("USB\\") {
+        return CodecObservability::UsbAudioBypass(info);
     }
+    if upper_id.starts_with("BTHENUM\\")
+        || upper_id.starts_with("BTHHFENUM\\")
+        || upper_id.contains("BTHA2DP")
+    {
+        return CodecObservability::BluetoothMicrosoftStack(info);
+    }
+
+    // Heuristic fallback when InstanceId isn't available (the common case
+    // for audio endpoint property stores). Windows formats USB Audio
+    // device friendly names as `<localized name> (<bus>- <USB product>)`,
+    // e.g. `"ヘッドセット イヤフォン (2- BTD 700)"`.
+    if looks_like_usb_audio(friendly_name) {
+        return CodecObservability::UsbAudioBypass(info);
+    }
+
+    // Bluetooth output friendly names typically include "Bluetooth", or
+    // "Hands-Free", or contain a stereo/headset profile descriptor.
+    let lower_name = friendly_name.to_ascii_lowercase();
+    if lower_name.contains("bluetooth") || lower_name.contains("a2dp") {
+        return CodecObservability::BluetoothMicrosoftStack(info);
+    }
+
+    CodecObservability::OtherOutput(info)
+}
+
+/// Detect Windows's `<name> (<bus number>- <USB product>)` convention used
+/// for USB Audio Class endpoints. Conservative — any digits followed by
+/// `-` then non-empty text inside the last set of parens.
+fn looks_like_usb_audio(friendly_name: &str) -> bool {
+    let Some(open) = friendly_name.rfind('(') else {
+        return false;
+    };
+    let Some(close) = friendly_name.rfind(')') else {
+        return false;
+    };
+    if close <= open {
+        return false;
+    }
+    let inside = &friendly_name[open + 1..close];
+    let Some(dash) = inside.find('-') else {
+        return false;
+    };
+    let bus = &inside[..dash];
+    let rest = inside[dash + 1..].trim_start();
+    !bus.is_empty() && bus.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty()
 }
 
 #[cfg(test)]
@@ -221,49 +282,88 @@ mod tests {
         assert_eq!(parse_usb_vid_pid(id), (None, None));
     }
 
+    fn make_info(friendly: &str, instance: &str) -> PlaybackDevice {
+        let (vid, pid) = parse_usb_vid_pid(instance);
+        PlaybackDevice {
+            friendly_name: friendly.into(),
+            instance_id: instance.into(),
+            endpoint_id: String::new(),
+            vid,
+            pid,
+        }
+    }
+
     #[test]
-    fn classify_btd700_as_usb_bypass() {
-        let info = PlaybackDevice {
-            friendly_name: "USB Audio Device".into(),
-            instance_id: r"USB\VID_3542&PID_3001\09B88CA9D6F088AB3C08".into(),
-            vid: Some(0x3542),
-            pid: Some(0x3001),
-        };
-        let id = info.instance_id.clone();
-        match classify(&id, info) {
+    fn classify_btd700_via_instance_id() {
+        let id = r"USB\VID_3542&PID_3001\09B88CA9D6F088AB3C08";
+        let info = make_info("USB Audio Device", id);
+        match classify(id, "USB Audio Device", info) {
             CodecObservability::UsbAudioBypass(_) => {}
             other => panic!("expected UsbAudioBypass, got {other:?}"),
         }
     }
 
     #[test]
-    fn classify_bluetooth_as_microsoft_stack() {
-        let info = PlaybackDevice {
-            friendly_name: "Bluetooth Headphones".into(),
-            instance_id: r"BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}_LOCALMFG&0000\7&abc"
-                .into(),
-            vid: None,
-            pid: None,
-        };
-        let id = info.instance_id.clone();
-        match classify(&id, info) {
+    fn classify_btd700_via_friendly_name_when_instance_id_empty() {
+        // Real-world case: Windows audio endpoint property store does not
+        // expose DEVPKEY_Device_InstanceId for the BTD700, so we fall back
+        // to the friendly-name heuristic.
+        let friendly = "ヘッドセット イヤフォン (2- BTD 700)";
+        let info = make_info(friendly, "");
+        match classify("", friendly, info) {
+            CodecObservability::UsbAudioBypass(_) => {}
+            other => panic!("expected UsbAudioBypass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_bluetooth_via_instance_id() {
+        let id = r"BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}_LOCALMFG&0000\7&abc";
+        let info = make_info("Bluetooth Headphones", id);
+        match classify(id, "Bluetooth Headphones", info) {
             CodecObservability::BluetoothMicrosoftStack(_) => {}
             other => panic!("expected BluetoothMicrosoftStack, got {other:?}"),
         }
     }
 
     #[test]
-    fn classify_internal_as_other() {
-        let info = PlaybackDevice {
-            friendly_name: "Speakers".into(),
-            instance_id: r"HDAUDIO\FUNC_01&VEN_10EC&DEV_0294&SUBSYS_xxxx".into(),
-            vid: None,
-            pid: None,
-        };
-        let id = info.instance_id.clone();
-        match classify(&id, info) {
+    fn classify_bluetooth_via_friendly_name() {
+        let info = make_info("Bluetooth A2DP Headset", "");
+        match classify("", "Bluetooth A2DP Headset", info) {
+            CodecObservability::BluetoothMicrosoftStack(_) => {}
+            other => panic!("expected BluetoothMicrosoftStack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_internal_speakers_as_other() {
+        let id = r"HDAUDIO\FUNC_01&VEN_10EC&DEV_0294&SUBSYS_xxxx";
+        let info = make_info("Speakers", id);
+        match classify(id, "Speakers", info) {
             CodecObservability::OtherOutput(_) => {}
             other => panic!("expected OtherOutput, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usb_audio_pattern_recognises_btd700() {
+        assert!(looks_like_usb_audio("ヘッドセット イヤフォン (2- BTD 700)"));
+    }
+
+    #[test]
+    fn usb_audio_pattern_recognises_english_name() {
+        assert!(looks_like_usb_audio("Speakers (3- USB Audio Device)"));
+    }
+
+    #[test]
+    fn usb_audio_pattern_rejects_internal_speakers() {
+        assert!(!looks_like_usb_audio(
+            "Speakers (Realtek High Definition Audio)"
+        ));
+    }
+
+    #[test]
+    fn usb_audio_pattern_rejects_no_parens() {
+        assert!(!looks_like_usb_audio("Headphones"));
     }
 }

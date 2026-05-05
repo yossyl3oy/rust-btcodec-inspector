@@ -95,7 +95,12 @@ fn main() {
 
     fn print_device(dev: &PlaybackDevice) {
         println!("  Friendly name: {}", dev.friendly_name);
-        println!("  Instance ID:   {}", dev.instance_id);
+        if !dev.instance_id.is_empty() {
+            println!("  Instance ID:   {}", dev.instance_id);
+        }
+        if !dev.endpoint_id.is_empty() {
+            println!("  Endpoint ID:   {}", dev.endpoint_id);
+        }
         if let (Some(vid), Some(pid)) = (dev.vid, dev.pid) {
             println!("  USB VID:PID:   {:04X}:{:04X}", vid, pid);
         }
@@ -104,7 +109,14 @@ fn main() {
     fn print_device_diagnostic(dev: &PlaybackDevice) {
         eprintln!();
         eprintln!("  Friendly name: {}", dev.friendly_name);
-        eprintln!("  Instance ID:   {}", dev.instance_id);
+        if !dev.instance_id.is_empty() {
+            eprintln!("  Instance ID:   {}", dev.instance_id);
+        } else {
+            eprintln!("  Instance ID:   (not exposed by audio endpoint property store)");
+        }
+        if !dev.endpoint_id.is_empty() {
+            eprintln!("  Endpoint ID:   {}", dev.endpoint_id);
+        }
         if let (Some(vid), Some(pid)) = (dev.vid, dev.pid) {
             eprintln!("  USB VID:PID:   {:04X}:{:04X}", vid, pid);
         }

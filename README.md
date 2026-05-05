@@ -42,10 +42,10 @@ btcodec-inspector.exe
 
 ```toml
 [dependencies]
-btcodec-inspector = { version = "0.2", default-features = false }
+btcodec-inspector = { version = "0.3", default-features = false }
 ```
 
-`default-features = false` opts out of the `cli` feature, which is only needed by the CLI binary (it pulls in `ctrlc`). The library itself only depends on `ferrisetw` and `is_elevated` on Windows.
+`default-features = false` opts out of the `cli` feature, which is only needed by the CLI binary (it pulls in `ctrlc`). The library depends on `ferrisetw`, `is_elevated`, and `windows` (for default-playback inspection) on Windows.
 
 ```rust
 use btcodec_inspector::watch;
@@ -70,6 +70,26 @@ let _watcher = watch(move |codec| {
 ```
 
 The `A2dpCodec` type itself is cross-platform, so the codec ID -> name mapping can be used on macOS / Linux too if you have raw IDs from another source.
+
+### Default-playback inspection
+
+Before starting an ETW session you can ask the library whether the current default playback device is even something this tool can observe. This is useful for HUD / tray apps that want to render a meaningful state instead of silently watching for events that will never come.
+
+```rust
+use btcodec_inspector::{observe_default_playback, CodecObservability};
+
+match observe_default_playback().unwrap() {
+    CodecObservability::BluetoothMicrosoftStack(dev) => { /* ETW will work — start watch() */ }
+    CodecObservability::UsbAudioBypass(dev) => {
+        // dev.friendly_name / dev.instance_id / dev.vid / dev.pid available
+        // for the HUD to render a "USB transmitter — codec unknown" state.
+    }
+    CodecObservability::OtherOutput(dev) => { /* built-in speakers, HDMI, etc. */ }
+    CodecObservability::NoDevice => { /* no default render endpoint */ }
+}
+```
+
+The library returns structured data only — formatting and presentation (CLI message, HUD notification, tray icon, etc.) is the caller's responsibility.
 
 ## Supported codecs
 
@@ -111,6 +131,7 @@ cargo check --target x86_64-pc-windows-msvc
 
 - A2DP streaming events are not always emitted in real time. Format information may appear during the playback session or only at the end. This is a Windows Bluetooth Audio Stack limitation.
 - Only works when the Bluetooth chipset is using Microsoft's Bluetooth stack (the case for ~all modern Windows PCs). 3rd-party stacks (legacy WIDCOMM / BTW, old Toshiba stack, etc.) bypass this provider and emit no events.
+- USB Bluetooth transmitters that present themselves as USB Audio Class devices (PC sees them as a USB speaker, not a Bluetooth radio) are also out of scope — Windows never sees the Bluetooth side, so the codec the dongle negotiated cannot be read. The CLI detects this case via `observe_default_playback()` and prints a clear warning instead of silently producing no output.
 - LE Audio (LC3 / LC3plus over LE Audio) uses a different ETW provider and is not covered.
 
 ## License

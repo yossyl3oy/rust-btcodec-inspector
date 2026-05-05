@@ -31,11 +31,12 @@ dependencies = [
 
 [[package]]
 name = "btcodec-inspector"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "ctrlc",
  "ferrisetw",
  "is_elevated",
+ "windows",
 ]
 
 [[package]]

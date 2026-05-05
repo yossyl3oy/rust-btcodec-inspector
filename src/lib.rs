@@ -46,3 +46,8 @@ pub use codec::A2dpCodec;
 mod watcher;
 #[cfg(windows)]
 pub use watcher::{watch, Error, Watcher};
+
+#[cfg(windows)]
+mod playback;
+#[cfg(windows)]
+pub use playback::{observe_default_playback, CodecObservability, PlaybackDevice, PlaybackError};
